@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <string.h>
 #include"bmlib_internal.h"
 #include "bmlib_log.h"
 #include "api.h"
@@ -625,9 +627,38 @@ bm_status_t bm_create_ctx(bm_context_t *ctx, int devid)
 
 #ifdef SOC_MODE
 	fd = open("/dev/ion", O_RDWR);
+	/* fd 0/1/2 are reserved for stdio. If /dev/ion happens to land on one of
+	 * them, relocate it to >= 3: ion_fd == 0 is treated as "no ION" by the
+	 * fd > 0 checks elsewhere, which silently routes all device memory
+	 * allocations to the bmsophon private pool (invisible to the ION ledger). */
+	if (fd >= 0 && fd < 3) {
+		int nfd = fcntl(fd, F_DUPFD, 3);
+		close(fd);
+		if (nfd >= 3) {
+			fd = nfd;
+		} else {
+			bmlib_log(BMLIB_RUNTIME_LOG_TAG, BMLIB_LOG_ERROR,
+				"relocate ion fd (got %d) failed (nfd=%d)\n", fd, nfd);
+			close(ctx->dev_fd);
+			return BM_ERR_FAILURE;
+		}
+	}
 	if (fd > 0) {
 		ctx->ion_fd = fd;
-		bm_get_carveout_heap_id(ctx);
+		if (bm_get_carveout_heap_id(ctx) != BM_SUCCESS) {
+			bmlib_log(BMLIB_RUNTIME_LOG_TAG, BMLIB_LOG_ERROR,
+				"bm_get_carveout_heap_id failed, ion_fd=%d\n", fd);
+			close(ctx->ion_fd);
+			ctx->ion_fd = 0;
+			close(ctx->dev_fd);
+			return BM_ERR_FAILURE;
+		}
+	} else {
+		bmlib_log(BMLIB_RUNTIME_LOG_TAG, BMLIB_LOG_ERROR,
+			"open /dev/ion failed: fd=%d errno=%d(%s)\n",
+			fd, errno, strerror(errno));
+		close(ctx->dev_fd);
+		return BM_ERR_FAILURE;
 	}
 
 	// fd = open("/dev/bce-base", O_RDWR);
